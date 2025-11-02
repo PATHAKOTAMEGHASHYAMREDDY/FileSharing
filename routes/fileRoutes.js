@@ -141,6 +141,13 @@ router.post('/upload', verifyToken, upload.array('files', 2), async (req, res) =
       
       const cloudinaryResult = await uploadPromise;
       
+      // Create encrypted index for searchability
+      const encryptedSearch = require('../utils/encryptedSearch');
+      const encryptedIndex = encryptedSearch.createEncryptedIndex(
+        file.originalname,
+        senderKey
+      );
+      
       // Save file metadata to database
       const newFile = await File.create({
         fileName: encryptedFileName,
@@ -153,6 +160,7 @@ router.post('/upload', verifyToken, upload.array('files', 2), async (req, res) =
         recipientEmail: recipientEmail,
         recipientId: recipient ? recipient._id : null,
         encryptedWithKey: sender.encryptionKey,
+        encryptedIndex: encryptedIndex,
         uploadStatus: 'uploaded',
         downloadRequestStatus: 'not_requested'
       });

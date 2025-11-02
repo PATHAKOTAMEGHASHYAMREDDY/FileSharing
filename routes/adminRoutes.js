@@ -8,13 +8,13 @@ const generateTokens = (adminId) => {
   const accessToken = jwt.sign(
     { id: adminId, role: "admin" },
     process.env.JWT_SECRET,
-    { expiresIn: "15m" }
+    { expiresIn: "30d" }
   );
 
   const refreshToken = jwt.sign(
     { id: adminId, role: "admin" },
     process.env.JWT_SECRET,
-    { expiresIn: "7d" }
+    { expiresIn: "30d" }
   );
 
   return { accessToken, refreshToken };
@@ -605,3 +605,175 @@ router.put(
     }
   }
 );
+
+
+// Encrypted Search for Admin
+const encryptedSearch = require('../utils/encryptedSearch');
+const crypto = require('crypto');
+
+// @route   POST /api/admin/search/files
+// @desc    Search all files using encrypted indexing (admin needs user keys)
+// @access  Private (Admin only)
+router.post('/search/files', verifyAdminToken, async (req, res) => {
+  try {
+    const { query, userId } = req.body;
+    
+    if (!query || !query.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Search query is required'
+      });
+    }
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: 'User ID is required for encrypted search'
+      });
+    }
+
+    // Get user's encryption key
+    const user = await User.findById(userId).select('+encryptionKey');
+    
+    if (!user || !user.encryptionKey) {
+      return res.status(400).json({
+        success: false,
+        message: 'User encryption key not found'
+      });
+    }
+
+    // Decrypt user's encryption key
+    const masterKey = Buffer.from(process.env.MASTER_ENCRYPTION_KEY, 'hex');
+    const iv = Buffer.from(process.env.ENCRYPTION_IV, 'hex');
+    const encryptedKeyBuffer = Buffer.from(user.encryptionKey, 'hex');
+    
+    const decipher = crypto.createDecipheriv('aes-256-cbc', masterKey, iv);
+    let decrypted = decipher.update(encryptedKeyBuffer);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    const userKey = decrypted;
+
+    // Parse the boolean query
+    const parsedQuery = encryptedSearch.parseQuery(query);
+
+    // Get all files related to this user
+    const files = await File.find({
+      $or: [
+        { senderId: userId },
+        { recipientId: userId }
+      ]
+    })
+      .select('+encryptedIndex')
+      .populate('senderId', 'username email type')
+      .populate('recipientId', 'username email type')
+      .populate('approvedBy', 'username email');
+
+    // Search through encrypted indexes
+    const matchedFiles = files.filter(file => {
+      if (!file.encryptedIndex || file.encryptedIndex.length === 0) {
+        // Create index on the fly if not exists
+        file.encryptedIndex = encryptedSearch.createEncryptedIndex(
+          file.originalFileName,
+          userKey
+        );
+      }
+      
+      return encryptedSearch.searchIndex(
+        file.encryptedIndex,
+        parsedQuery,
+        userKey
+      );
+    });
+
+    // Format results
+    const results = matchedFiles.map(file => ({
+      id: file._id,
+      originalFileName: file.originalFileName,
+      fileSize: file.fileSize,
+      mimeType: file.mimeType,
+      sender: {
+        username: file.senderId.username,
+        email: file.senderId.email,
+        type: file.senderId.type
+      },
+      recipient: {
+        email: file.recipientEmail,
+        username: file.recipientId?.username || 'Not registered',
+        type: file.recipientId?.type || 'N/A'
+      },
+      uploadStatus: file.uploadStatus,
+      downloadRequestStatus: file.downloadRequestStatus,
+      uploadedAt: file.uploadedAt,
+      downloadRequestedAt: file.downloadRequestedAt,
+      approvedAt: file.approvedAt,
+      approvedBy: file.approvedBy ? {
+        username: file.approvedBy.username,
+        email: file.approvedBy.email
+      } : null,
+      rejectionReason: file.rejectionReason
+    }));
+
+    res.status(200).json({
+      success: true,
+      query: query,
+      parsedQuery: parsedQuery,
+      count: results.length,
+      data: results
+    });
+
+  } catch (error) {
+    console.error('Admin search files error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to search files',
+      error: error.message
+    });
+  }
+});
+
+// @route   GET /api/admin/search/users
+// @desc    Search users by username or email
+// @access  Private (Admin only)
+router.get('/search/users', verifyAdminToken, async (req, res) => {
+  try {
+    const { query } = req.query;
+    
+    if (!query || !query.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Search query is required'
+      });
+    }
+
+    const searchRegex = new RegExp(query, 'i');
+    
+    const users = await User.find({
+      $or: [
+        { username: searchRegex },
+        { email: searchRegex }
+      ]
+    }).select('-password').sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      query: query,
+      count: users.length,
+      data: users.map(u => ({
+        id: u._id,
+        username: u.username,
+        email: u.email,
+        type: u.type,
+        isActive: u.isActive,
+        createdAt: u.createdAt,
+        lastLogin: u.lastLogin
+      }))
+    });
+
+  } catch (error) {
+    console.error('Search users error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to search users',
+      error: error.message
+    });
+  }
+});

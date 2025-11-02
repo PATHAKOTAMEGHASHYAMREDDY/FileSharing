@@ -9,13 +9,13 @@ const generateTokens = (userId) => {
   const accessToken = jwt.sign(
     { id: userId, role: 'user' },
     process.env.JWT_SECRET,
-    { expiresIn: '15m' }
+    { expiresIn: '30d' }
   );
   
   const refreshToken = jwt.sign(
     { id: userId, role: 'user' },
     process.env.JWT_SECRET,
-    { expiresIn: '7d' }
+    { expiresIn: '30d' }
   );
   
   return { accessToken, refreshToken };
@@ -343,3 +343,124 @@ router.post('/profile/generate-key', verifyToken, async (req, res) => {
 
 
 module.exports = router;
+
+
+// Encrypted Search Routes
+const encryptedSearch = require('../utils/encryptedSearch');
+const File = require('../models/files');
+
+// @route   POST /api/users/search/files
+// @desc    Search files using encrypted indexing with boolean queries
+// @access  Private
+router.post('/search/files', verifyToken, async (req, res) => {
+  try {
+    const { query, searchIn } = req.body;
+    
+    if (!query || !query.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Search query is required'
+      });
+    }
+
+    // Get user's encryption key
+    const user = await User.findById(req.user.id).select('+encryptionKey');
+    
+    if (!user || !user.encryptionKey) {
+      return res.status(400).json({
+        success: false,
+        message: 'Encryption key not set. Please generate an encryption key first.'
+      });
+    }
+
+    // Decrypt user's encryption key
+    const masterKey = Buffer.from(process.env.MASTER_ENCRYPTION_KEY, 'hex');
+    const iv = Buffer.from(process.env.ENCRYPTION_IV, 'hex');
+    const encryptedKeyBuffer = Buffer.from(user.encryptionKey, 'hex');
+    
+    const decipher = crypto.createDecipheriv('aes-256-cbc', masterKey, iv);
+    let decrypted = decipher.update(encryptedKeyBuffer);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    const userKey = decrypted;
+
+    // Parse the boolean query
+    const parsedQuery = encryptedSearch.parseQuery(query);
+
+    // Determine which files to search
+    let fileFilter = {};
+    if (searchIn === 'received') {
+      fileFilter = { recipientId: req.user.id };
+    } else if (searchIn === 'uploaded') {
+      fileFilter = { senderId: req.user.id };
+    } else {
+      // Search both
+      fileFilter = {
+        $or: [
+          { senderId: req.user.id },
+          { recipientId: req.user.id }
+        ]
+      };
+    }
+
+    // Get files with encrypted index
+    const files = await File.find(fileFilter)
+      .select('+encryptedIndex')
+      .populate('senderId', 'username email type')
+      .populate('recipientId', 'username email type');
+
+    // Search through encrypted indexes
+    const matchedFiles = files.filter(file => {
+      if (!file.encryptedIndex || file.encryptedIndex.length === 0) {
+        // Fallback: create index on the fly if not exists
+        file.encryptedIndex = encryptedSearch.createEncryptedIndex(
+          file.originalFileName,
+          userKey
+        );
+      }
+      
+      return encryptedSearch.searchIndex(
+        file.encryptedIndex,
+        parsedQuery,
+        userKey
+      );
+    });
+
+    // Format results
+    const results = matchedFiles.map(file => ({
+      id: file._id,
+      originalFileName: file.originalFileName,
+      fileSize: file.fileSize,
+      mimeType: file.mimeType,
+      sender: file.senderId ? {
+        username: file.senderId.username,
+        email: file.senderId.email,
+        type: file.senderId.type
+      } : null,
+      recipient: file.recipientId ? {
+        username: file.recipientId.username,
+        email: file.recipientId.email,
+        type: file.recipientId.type
+      } : { email: file.recipientEmail },
+      downloadRequestStatus: file.downloadRequestStatus,
+      uploadedAt: file.uploadedAt,
+      downloadRequestedAt: file.downloadRequestedAt,
+      approvedAt: file.approvedAt
+    }));
+
+    res.status(200).json({
+      success: true,
+      query: query,
+      parsedQuery: parsedQuery,
+      count: results.length,
+      data: results
+    });
+
+  } catch (error) {
+    console.error('Search files error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to search files',
+      error: error.message
+    });
+  }
+});

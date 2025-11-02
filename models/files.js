@@ -44,6 +44,11 @@ const fileSchema = new mongoose.Schema({
     required: true,
     select: false
   },
+  encryptedIndex: {
+    type: [String],
+    default: [],
+    select: false
+  },
   uploadStatus: {
     type: String,
     enum: ['uploaded'],
