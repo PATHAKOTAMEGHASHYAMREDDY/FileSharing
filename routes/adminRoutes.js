@@ -628,61 +628,38 @@ router.post('/search/files', verifyAdminToken, async (req, res) => {
     // Parse the boolean query
     const parsedQuery = encryptedSearch.parseQuery(query);
 
-    // Get all files with their encrypted indexes and sender info
+    // Get all files
     const files = await File.find({})
-      .select('+encryptedIndex')
-      .populate({
-        path: 'senderId',
-        select: '+encryptionKey username email type'
-      })
+      .populate('senderId', 'username email type')
       .populate('recipientId', 'username email type')
       .populate('approvedBy', 'username email')
       .sort({ uploadedAt: -1 });
 
-    const masterKey = Buffer.from(process.env.MASTER_ENCRYPTION_KEY, 'hex');
-    const iv = Buffer.from(process.env.ENCRYPTION_IV, 'hex');
+    // Search through filenames using boolean logic (plain text search)
+    const matchedFiles = files.filter(file => {
+      const fileName = file.originalFileName.toLowerCase();
+      const tokens = fileName.split(/[\s._-]+/).filter(t => t.length > 0);
 
-    // Search through encrypted indexes
-    const matchedFiles = [];
-    
-    for (const file of files) {
-      try {
-        // Get sender's encryption key
-        if (!file.senderId || !file.senderId.encryptionKey) {
-          continue;
-        }
-
-        // Decrypt sender's encryption key
-        const encryptedKeyBuffer = Buffer.from(file.senderId.encryptionKey, 'hex');
-        const decipher = crypto.createDecipheriv('aes-256-cbc', masterKey, iv);
-        let decrypted = decipher.update(encryptedKeyBuffer);
-        decrypted = Buffer.concat([decrypted, decipher.final()]);
-        const userKey = decrypted;
-
-        // Create index if not exists
-        if (!file.encryptedIndex || file.encryptedIndex.length === 0) {
-          file.encryptedIndex = encryptedSearch.createEncryptedIndex(
-            file.originalFileName,
-            userKey
-          );
-        }
-
-        // Search the encrypted index
-        const matches = encryptedSearch.searchIndex(
-          file.encryptedIndex,
-          parsedQuery,
-          userKey
+      // Check AND conditions (all must match)
+      const andMatch = parsedQuery.and.length === 0 || 
+        parsedQuery.and.every(term => 
+          tokens.some(token => token.includes(term))
         );
 
-        if (matches) {
-          matchedFiles.push(file);
-        }
-      } catch (error) {
-        // Skip files with decryption errors
-        console.error(`Error searching file ${file._id}:`, error.message);
-        continue;
-      }
-    }
+      // Check OR conditions (at least one must match)
+      const orMatch = parsedQuery.or.length === 0 || 
+        parsedQuery.or.some(term => 
+          tokens.some(token => token.includes(term))
+        );
+
+      // Check NOT conditions (none should match)
+      const notMatch = parsedQuery.not.length === 0 || 
+        !parsedQuery.not.some(term => 
+          tokens.some(token => token.includes(term))
+        );
+
+      return andMatch && orMatch && notMatch;
+    });
 
     // Format results
     const results = matchedFiles.map(file => ({

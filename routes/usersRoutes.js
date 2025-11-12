@@ -402,27 +402,35 @@ router.post('/search/files', verifyToken, async (req, res) => {
       };
     }
 
-    // Get files with encrypted index
+    // Get all files
     const files = await File.find(fileFilter)
-      .select('+encryptedIndex')
       .populate('senderId', 'username email type')
       .populate('recipientId', 'username email type');
 
-    // Search through encrypted indexes
+    // Search through filenames using boolean logic (plain text search)
     const matchedFiles = files.filter(file => {
-      if (!file.encryptedIndex || file.encryptedIndex.length === 0) {
-        // Fallback: create index on the fly if not exists
-        file.encryptedIndex = encryptedSearch.createEncryptedIndex(
-          file.originalFileName,
-          userKey
+      const fileName = file.originalFileName.toLowerCase();
+      const tokens = fileName.split(/[\s._-]+/).filter(t => t.length > 0);
+
+      // Check AND conditions (all must match)
+      const andMatch = parsedQuery.and.length === 0 || 
+        parsedQuery.and.every(term => 
+          tokens.some(token => token.includes(term))
         );
-      }
-      
-      return encryptedSearch.searchIndex(
-        file.encryptedIndex,
-        parsedQuery,
-        userKey
-      );
+
+      // Check OR conditions (at least one must match)
+      const orMatch = parsedQuery.or.length === 0 || 
+        parsedQuery.or.some(term => 
+          tokens.some(token => token.includes(term))
+        );
+
+      // Check NOT conditions (none should match)
+      const notMatch = parsedQuery.not.length === 0 || 
+        !parsedQuery.not.some(term => 
+          tokens.some(token => token.includes(term))
+        );
+
+      return andMatch && orMatch && notMatch;
     });
 
     // Format results
